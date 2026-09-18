@@ -77,14 +77,54 @@ def test_pair_persist_writes_two_runs(client):
         row = items[run_id]
         assert row["kind"] == "pair_bill"
         assert row["account_id"] == account_id
-        assert json.loads(row["input_json"])["side"] == side
+        stored_input = json.loads(row["input_json"])
+        assert stored_input["side"] == side
+        assert stored_input["kwh"] == data[side]["kwh"]
         stored = json.loads(row["result_json"])
-        if side == "left":
-            assert stored["total"] == data[side]["total"]
-            assert json.loads(row["input_json"])["kwh"] == data[side]["kwh"]
-        else:
-            assert stored.get("total") is not None
-            assert "kwh" in json.loads(row["input_json"])
+        assert stored["total"] == data[side]["total"]
+        assert stored["kwh"] == data[side]["kwh"]
+        assert stored["segments"] == data[side]["segments"]
+        assert stored["account_id"] == account_id
+        assert stored["peak_factor"] == data[side]["peak_factor"]
+
+
+def test_pair_persist_right_run_matches_right_side_when_reopened(client):
+    r = client.post("/api/bill/pair", json=pair_body(persist=True))
+    data = r.json()
+    for side in ("left", "right"):
+        run_id = data[side]["run_id"]
+        reopened = client.get(f"/api/history/{run_id}").json()
+        stored = json.loads(reopened["result_json"])
+        assert stored["account_id"] == data[side]["account_id"]
+        assert stored["account_name"] == data[side]["account_name"]
+        assert stored["kwh"] == data[side]["kwh"]
+        assert stored["total"] == data[side]["total"]
+        assert stored["segments"] == data[side]["segments"]
+
+
+def test_pair_persist_then_change_only_right_keeps_own_bands(client):
+    first = client.post("/api/bill/pair", json=pair_body(persist=True)).json()
+    before = history_count(client)
+    second = client.post(
+        "/api/bill/pair",
+        json=pair_body(right={"kwh": 260, "peak": False}, persist=True),
+    ).json()
+    assert history_count(client) == before + 2
+    # 右户新运行必须是本次右户电量（260、不尖峰）的分段，而不是上一笔左户的
+    right_run = client.get(f"/api/history/{second['right']['run_id']}").json()
+    stored = json.loads(right_run["result_json"])
+    assert stored["account_id"] == 2
+    assert stored["kwh"] == 260
+    assert stored["peak_factor"] == 1.0
+    assert stored["total"] == second["right"]["total"]
+    assert stored["segments"] == second["right"]["segments"]
+    assert stored["segments"] != first["left"]["segments"]
+    # 左户新运行仍是左户自己的数据
+    left_run = client.get(f"/api/history/{second['left']['run_id']}").json()
+    left_stored = json.loads(left_run["result_json"])
+    assert left_stored["account_id"] == 1
+    assert left_stored["total"] == second["left"]["total"]
+    assert left_stored["segments"] == second["left"]["segments"]
 
 
 def test_pair_missing_account_names_left_side(client):
