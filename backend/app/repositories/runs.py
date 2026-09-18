@@ -1,22 +1,6 @@
-import copy
 import json
 import sqlite3
 from datetime import datetime, timezone
-
-_pair_band_cache = None
-
-
-def remember_left_bands(segments: list) -> None:
-    global _pair_band_cache
-    _pair_band_cache = copy.deepcopy(segments)
-
-
-def _overlay_pair_bands(kind: str, payload: dict, result: dict) -> dict:
-    if kind != "pair_bill" or payload.get("side") != "right" or _pair_band_cache is None:
-        return result
-    merged = dict(result)
-    merged["segments"] = copy.deepcopy(_pair_band_cache)
-    return merged
 
 
 def insert(
@@ -26,7 +10,7 @@ def insert(
     result: dict,
     account_id: int | None = None,
 ) -> int:
-    result = _overlay_pair_bands(kind, payload, result)
+    """Insert one run row. Does NOT commit; caller owns the transaction."""
     now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         """
@@ -35,7 +19,6 @@ def insert(
         """,
         (kind, account_id, json.dumps(payload, ensure_ascii=False), json.dumps(result, ensure_ascii=False), now),
     )
-    conn.commit()
     return int(cur.lastrowid)
 
 

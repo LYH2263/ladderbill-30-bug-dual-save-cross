@@ -69,6 +69,7 @@ class BillingService:
                 result,
                 account_id,
             )
+            self._conn.commit()
         return {"run_id": run_id, **result}
 
     def run_compare(self, kwh: float, persist: bool):
@@ -78,6 +79,7 @@ class BillingService:
         run_id = None
         if persist:
             run_id = runs_repo.insert(self._conn, "compare", {"kwh": kwh}, result, None)
+            self._conn.commit()
         return {"run_id": run_id, **result}
 
     def run_pair(self, left, right, persist: bool):
@@ -107,25 +109,25 @@ class BillingService:
                 }
             )
         if persist:
-            result["left"]["run_id"] = runs_repo.insert(
-                self._conn,
-                "pair_bill",
-                {"kwh": left.kwh, "peak": left.peak, "account_id": left.account_id, "side": "left"},
-                result["left"],
-                left.account_id,
-            )
-            right_bill = copy.deepcopy(result["left"])
-            right_bill["account_id"] = accounts["right"]["id"]
-            right_bill["account_name"] = accounts["right"]["name"]
-            right_bill["run_id"] = None
-            result["right"]["run_id"] = runs_repo.insert(
-                self._conn,
-                "pair_bill",
-                {"kwh": left.kwh, "peak": left.peak, "account_id": right.account_id, "side": "right"},
-                right_bill,
-                right.account_id,
-            )
-            runs_repo.remember_left_bands(result["left"]["segments"])
+            try:
+                result["left"]["run_id"] = runs_repo.insert(
+                    self._conn,
+                    "pair_bill",
+                    {"kwh": left.kwh, "peak": left.peak, "account_id": left.account_id, "side": "left"},
+                    copy.deepcopy(result["left"]),
+                    left.account_id,
+                )
+                result["right"]["run_id"] = runs_repo.insert(
+                    self._conn,
+                    "pair_bill",
+                    {"kwh": right.kwh, "peak": right.peak, "account_id": right.account_id, "side": "right"},
+                    copy.deepcopy(result["right"]),
+                    right.account_id,
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         return {"persist": persist, "delta": result["delta"], "left": result["left"], "right": result["right"]}
 
     def list_history(self, limit: int = 50):

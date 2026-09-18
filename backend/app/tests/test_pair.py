@@ -77,14 +77,73 @@ def test_pair_persist_writes_two_runs(client):
         row = items[run_id]
         assert row["kind"] == "pair_bill"
         assert row["account_id"] == account_id
-        assert json.loads(row["input_json"])["side"] == side
+        payload = json.loads(row["input_json"])
+        assert payload["side"] == side
         stored = json.loads(row["result_json"])
-        if side == "left":
-            assert stored["total"] == data[side]["total"]
-            assert json.loads(row["input_json"])["kwh"] == data[side]["kwh"]
-        else:
-            assert stored.get("total") is not None
-            assert "kwh" in json.loads(row["input_json"])
+        # 每条落库运行必须与并列区对应侧完全一致：户号、电量、分段、合计
+        assert payload["kwh"] == data[side]["kwh"]
+        assert payload["account_id"] == data[side]["account_id"]
+        assert stored["account_id"] == account_id
+        assert stored["account_name"] == data[side]["account_name"]
+        assert stored["kwh"] == data[side]["kwh"]
+        assert stored["total"] == data[side]["total"]
+        assert stored["segments"] == data[side]["segments"]
+        assert stored["peak_factor"] == data[side]["peak_factor"]
+
+    # 直接按编号打开，两侧各自自洽
+    left_row = client.get(f"/api/history/{left_id}").json()
+    right_row = client.get(f"/api/history/{right_id}").json()
+    left_stored = json.loads(left_row["result_json"])
+    right_stored = json.loads(right_row["result_json"])
+    assert left_stored["total"] == 62.40
+    assert right_stored["total"] == 309.60
+    assert len(left_stored["segments"]) == 1
+    assert len(right_stored["segments"]) == 3
+
+
+def test_pair_persist_twice_right_uses_its_own_bands(client):
+    # 第一次保存：左 120 / 右 400
+    first = client.post("/api/bill/pair", json=pair_body(persist=True)).json()
+    # 只改右户电量再保存：右 200（落在第二档），左户不动
+    second = client.post(
+        "/api/bill/pair",
+        json=pair_body(right={"kwh": 200, "peak": False}, persist=True),
+    ).json()
+    items = {h["id"]: h for h in client.get("/api/history").json()["items"]}
+    right_stored = json.loads(items[second["right"]["run_id"]]["result_json"])
+    # 新右户运行必须是本次右户 200kWh 的结果，不带上一笔左户的分段
+    assert right_stored["account_id"] == 2
+    assert right_stored["kwh"] == 200
+    assert right_stored["total"] == second["right"]["total"]
+    assert right_stored["segments"] == second["right"]["segments"]
+    assert right_stored["total"] != first["right"]["total"]
+    assert right_stored["segments"] != json.loads(
+        items[first["left"]["run_id"]]["result_json"]
+    )["segments"]
+    # 左户运行仍与并列区左侧一致
+    left_stored = json.loads(items[second["left"]["run_id"]]["result_json"])
+    assert left_stored["total"] == second["left"]["total"]
+    assert left_stored["segments"] == second["left"]["segments"]
+
+
+def test_pair_persist_failure_writes_nothing(client, monkeypatch):
+    from app.repositories import runs as runs_repo
+
+    before = history_count(client)
+    real_insert = runs_repo.insert
+    calls = {"n": 0}
+
+    def flaky_insert(conn, kind, payload, result, account_id=None):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom on right insert")
+        return real_insert(conn, kind, payload, result, account_id)
+
+    monkeypatch.setattr(runs_repo, "insert", flaky_insert)
+    # TestClient 默认把服务端异常直接抛出；关键是异常后记录条数不变
+    with pytest.raises(RuntimeError):
+        client.post("/api/bill/pair", json=pair_body(persist=True))
+    assert history_count(client) == before
 
 
 def test_pair_missing_account_names_left_side(client):
